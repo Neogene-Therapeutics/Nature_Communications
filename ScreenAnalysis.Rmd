@@ -1,0 +1,663 @@
+---
+editor_options:
+  chunk_output_type: console
+output:
+  html_document: default
+  pdf_document: default
+---
+
+```{r 1, echo = FALSE}
+
+# library(OwnFunctions)
+library(knitr)
+
+# Set wrap-hook; use as linewidth = 90 (example)
+# From https://github.com/yihui/knitr-examples/blob/master/077-wrap-output.Rmd#L17
+hook_output = knit_hooks$get('output')
+knit_hooks$set(output = function(x, options) {
+  # this hook is used only when the linewidth option is not NULL
+  if (!is.null(n <- options$linewidth)) {
+    x = knitr:::split_lines(x)
+    # any lines wider than n should be wrapped
+    if (any(nchar(x) > n)) x = strwrap(x, width = n)
+    x = paste(x, collapse = '\n')
+  }
+  hook_output(x, options)
+})
+
+# Set default chunk settings
+opts_chunk$set(fig.width = 7, fig.height = 7, message = FALSE, echo = FALSE,
+               warning = FALSE, linewidth = 90)
+
+```
+
+#### Define settings for analysis
+
+```{r 2, echo = TRUE, include = TRUE}
+
+# Define directories and libraries
+ANALYSIS.FOLDER <- "/home/patient_data/PTNAME"
+load(file.path(ANALYSIS.FOLDER, "input", "input_ScreenAnalysis.Rdata"))
+INPUT$directories <- list(Lib1 = c("ONTLIB1RUN1",
+                                   "ONTLIB1RUN2"),
+                          Lib2 = c("ONTLIB2RUN1",
+                                   "ONTLIB2RUN2"),
+                          Lib3 = c("ONTLIB3RUN1",
+                                   "ONTLIB3RUN2"))
+INPUT$combicoding[5, 2] <- "TMGNAME1"
+INPUT$combicoding[7, 3] <- "TMGNAME2"
+INPUT$combicoding[2, 7] <- "TMGNAME3"
+save(INPUT, file = file.path(ANALYSIS.FOLDER, "input",
+                             "input_ScreenAnalysis.Rdata"), compress = "xz")
+
+
+# Get folder location of current file
+ANALYSIS.FOLDER <- dirname(dirname(knitr::current_input(dir = TRUE)))
+
+# Check for ability to write data to ANALYSIS.FOLDER
+if (file.access(ANALYSIS.FOLDER, mode = 2) != 0) {
+  stop("You don't have write permission in the analysis folder")
+}
+
+# Load the general input data and those for screen analysis design from
+# input_general.Rdata and input_ScreenAnalysis.Rdata
+if (file.access(file.path(ANALYSIS.FOLDER, "input", "input_general.Rdata"), mode = 4) != 0) {
+  stop("You don't have read permission on the file input_general.Rdata",
+       ", or the file input_general.Rdata does not exist")
+} else {
+  load(file.path(ANALYSIS.FOLDER, "input", "input_general.Rdata"))
+}
+
+if (file.access(file.path(ANALYSIS.FOLDER, "input", "input_ScreenAnalysis.Rdata"), mode = 4) != 0) {
+  stop("You don't have read permission on the file input_ScreenAnalysis.Rdata",
+       ", or the file input_ScreenAnalysis.Rdata does not exist")
+} else {
+  load(file.path(ANALYSIS.FOLDER, "input", "input_ScreenAnalysis.Rdata"))
+}
+
+# Set GLOBAL variables
+PATIENT.CODE <- INPUT.GENERAL$patient.code
+NCPU <- INPUT.GENERAL$ncpu
+DIRECTORIES <- INPUT$directories
+RELEVANT.BARCODES <- INPUT$relevant.barcodes
+REFERENCES <- INPUT$references
+SAMPLE.NAMES <- INPUT$sample.names
+ALL.BARCODES <- INPUT$all.barcodes
+COMBICODING <- INPUT$combicoding
+MIN.BARCODE.SCORE <- INPUT$min.barcode.score
+
+# Perform checks on input
+if (!length(DIRECTORIES) == length(RELEVANT.BARCODES)) {
+  stop("The lengths of the DIRECTORIES and RELEVANT.BARCODES lists are not the same")
+}
+
+if (!length(DIRECTORIES) == length(REFERENCES)) {
+  stop("The lengths of the DIRECTORIES and REFERENCES lists are not the same")
+}
+
+if (any(unlist(lapply(DIRECTORIES, file.access, mode = 4)) != 0)) {
+  stop("You don't have read permission on one or more of the files specified in DIRECTORIES",
+       ", or one or more of the files specified in DIRECTORIES do not exist")
+}
+
+if (!all(unlist(lapply(RELEVANT.BARCODES, length)) == unlist(lapply(REFERENCES, length)))) {
+  stop("The lengths of the RELEVANT.BARCODES and REFERENCES list elements are not the same")
+}
+
+if (!all(grepl("^[CR][0-9]{1,}\\.top$|^[CR][0-9]{1,}\\.bottom$", unlist(SAMPLE.NAMES)))) {
+  stop("Please check the SAMPLE.NAMES input; input does not match required pattern (e.g., C1.bottom)")
+}
+
+if (!all(unlist(RELEVANT.BARCODES) %in% unlist(ALL.BARCODES))) {
+  stop("Not all barcodes specified in RELEVANT.BARCODES are present in ALL.BARCODES")
+}
+
+if (!all(paste0(rep(c(colnames(COMBICODING), rownames(COMBICODING)), each = 2),
+                c(".top", ".bottom")) %in% unlist(SAMPLE.NAMES))) {
+  warning("Please note that some samples expected from COMBICODING are missing in SAMPLE.NAMES")
+}
+
+if (!all(grepl(paste0("^", PATIENT.CODE, "|Positive control|Non-transduced"), COMBICODING))) {
+  stop("Please check the COMBICODING input; input does not match required pattern (e.g., TMGNAME1)")
+}
+
+if (!is.numeric(MIN.BARCODE.SCORE)) {
+  stop("Please provide a numeric input for MIN.BARCODE.SCORE")
+}
+
+if (!all(names(DIRECTORIES) == names(RELEVANT.BARCODES) &
+         names(RELEVANT.BARCODES) == names(REFERENCES) &
+         names(REFERENCES) == names(SAMPLE.NAMES) &
+         names(SAMPLE.NAMES) == names(ALL.BARCODES))) {
+  stop("Library names are not matching between DIRECTORIES, RELEVANT.BARCODES, REFERENCES, SAMPLE.NAMES and ALL.BARCODES")
+}
+
+# Print input for this analysis
+print(INPUT.GENERAL)
+print(INPUT)
+
+# Check that the patient code and the folder name match
+if (!basename(ANALYSIS.FOLDER) == PATIENT.CODE) {
+  stop("The folder name and the input patient code do not match")
+}
+
+# Check that ONT data folders in DIRECTORIES exist
+if (!all(file.exists(unlist(DIRECTORIES)))) {
+  stop(paste("One or more of the TCR reference folder(s) in",
+             DIRECTORIES, "does not exist"))
+}
+
+# Check that references in REFERENCES exist
+if (!all(file.exists(unlist(REFERENCES)))) {
+  stop(paste("One or more of the TCR reference folder(s) in",
+             REFERENCES, "does not exist"))
+}
+
+# Create ScreenAnalysis folder in output folder if possible
+if (file.exists(file.path(ANALYSIS.FOLDER, "output", "ScreenAnalysis"))) {
+  if (!file.access(file.path(ANALYSIS.FOLDER, "output", "ScreenAnalysis"), mode = 2) == 0) {
+    stop("You don't have write permission on ",
+         file.path(ANALYSIS.FOLDER, "output", "ScreenAnalysis"))
+  }
+} else {
+  if (dir.create(file.path(ANALYSIS.FOLDER, "output", "ScreenAnalysis"), recursive = TRUE) == FALSE) {
+    stop(c("Failed to create the folder ", file.path(ANALYSIS.FOLDER, "output", "ScreenAnalysis"),
+           ", please check permissions"))
+  }
+}
+
+```
+
+#### Run guppy_aligner
+
+```{r 3, echo = TRUE, include = TRUE}
+
+# Define function to perform guppy_aligner and merge bam (single directory, reference)
+alignAndMergeSingleBam <- function(directory, reference, ncpu) {
+  
+  if (!file.exists(file.path(gsub('fastq_pass', 'alignments', directory), "merged.bam"))) {
+    
+    # Align
+    print(Sys.time())
+    start.time <- Sys.time()
+    system(paste('guppy_aligner --input_path', directory,
+                 '--save_path', gsub('fastq_pass', 'alignments', directory),
+                 '--align_ref', reference, '--worker_threads', ncpu))
+    print(Sys.time() - start.time)
+    
+    # Skip reads alignment
+    if (file.exists((file.path(gsub('fastq_pass', 'fast5_skip/basecalling/pass', directory))))){
+      print(Sys.time())
+      start.time <- Sys.time()
+      system(paste('guppy_aligner --input_path', gsub("fastq_pass", "fast5_skip/basecalling/pass", directory),
+                   '--save_path', gsub('fastq_pass', 'alignments', directory),
+                   '--align_ref', reference, '--bam --worker_threads', ncpu))
+      print(Sys.time() - start.time)
+    }
+    
+    # Define cleanup function
+    toBamHDMergeCleanup <- function(x) {
+      list.bam <- list.files(path = x, pattern = ".bam$", full.names = TRUE)
+      system(paste("samtools cat", file.path(x, "*.bam"), "-o", file.path(x, "merged.bam")))
+      unlink(list.bam)
+    }
+    
+    # Parallelize cleanup function
+    lapply(gsub('fastq_pass', 'alignments', directory), toBamHDMergeCleanup)
+  }
+  
+}
+
+# Define data.frame that instructs which data need to be aligned to which reference
+expandAlignmentDesign <- function(directories, relevant.barcodes, references) {
+  output <- mapply(function(directories, relevant.barcodes, references, nlibrary) {
+    directories.expanded <- rep(directories, each = length(relevant.barcodes))
+    nlibrary.expanded <- rep(nlibrary, each = length(relevant.barcodes))
+    relevant.barcodes.expanded <- rep(relevant.barcodes, length(directories))
+    references.expanded <- rep(references, length(directories))
+    df <- data.frame(path = file.path(directories.expanded, "fastq_pass",
+                                      relevant.barcodes.expanded),
+                     library = paste0("Lib", nlibrary.expanded),
+                     reference = references.expanded, stringsAsFactors = FALSE)
+    return(df)
+  }, directories = directories, relevant.barcodes = relevant.barcodes,
+  references = references, nlibrary = seq_len(length(directories)), SIMPLIFY = FALSE)
+  output <- Reduce(function(x, y) {rbind(x, y)}, output)
+  return(output)
+}
+expanded.alignment.design <- expandAlignmentDesign(directories = DIRECTORIES,
+                                                   relevant.barcodes = RELEVANT.BARCODES,
+                                                   references = REFERENCES)
+print.data.frame(data.frame(lapply(expanded.alignment.design, function(x) {
+  gsub(".*/(.*?/.*?/.*$)", "\\1", x)
+})), row.names = FALSE)
+
+## Run alignments and process to a single bam
+sink <- mapply(alignAndMergeSingleBam,
+               directory = expanded.alignment.design$path,
+               reference = expanded.alignment.design$reference,
+               ncpu = NCPU)
+
+```
+
+#### QC on basecalling and barcoding; get selection of reads
+
+```{r 4, echo = TRUE, include = TRUE}
+
+## Remove temporary sequencing summary files if present
+invisible(lapply(DIRECTORIES, function(directory) {
+  tmp.sequencing.summary.file <- file.path(directory, list.files(path = directory,
+                                                                 pattern = "^sequencing_summary.*.tmp$"))
+  unlink(tmp.sequencing.summary.file)
+}))
+
+## Define function to perform QC on basecalling and demultiplexing on a single directory
+gridionQC <- function(directory, threshold, relevant.barcodes, all.barcodes) {
+  ## read in the sequence summary file
+  if (file.exists(file.path(directory, "sequencing_summary.txt"))){
+    sequencing.summary <- iotools::read.delim.raw(
+      file = pipe(paste("cut -f 1,2,15,21,25", file.path(directory, "sequencing_summary.txt")))
+    )
+    colnames(sequencing.summary) <- c("filename_fast5", "read_id", "mean_qscore_template", "barcode_arrangement", "barcode_score")
+  } else if (length(list.files(path = directory, pattern = "^sequencing_summary")) != 0){
+    sequencing.summary <- iotools::read.delim.raw(file = pipe(paste("cut -f 2,3,15,25,29",
+                                                                  file.path(directory, list.files(path = directory,
+                                                                        pattern = "^sequencing_summary_")),
+                                                                    "'!/skip/'")))
+    colnames(sequencing.summary) <- c("filename_fast5", "read_id", "mean_qscore_template", "barcode_arrangement", "barcode_score")
+  } else {
+    sequencing.summary <- NULL
+  }
+  ## read in the sequence summary file also for skipped reads
+  if (file.exists(file.path(directory, "fast5_skip", "basecalling", "sequencing_summary.txt"))){
+    sequencing.summary.skip <- iotools::read.delim.raw(
+      file = pipe(paste("cut -f 1,2,15,21,25", file.path(directory, "fast5_skip", "basecalling", 
+                                                         list.files(path = file.path(directory, "fast5_skip", "basecalling"),
+                                                                        pattern = "sequencing_summary"))))
+    )
+    colnames(sequencing.summary.skip) <- c("filename_fast5", "read_id", "mean_qscore_template", "barcode_arrangement", "barcode_score")
+  } else {
+      sequencing.summary.skip <- NULL
+  }
+  
+  output <- rbind(sequencing.summary.skip, sequencing.summary)
+  output[, "run"] <- rep(basename(directory), nrow(output))
+  output$barcode_arrangement <-
+    factor(output$barcode_arrangement, levels = all.barcodes)
+  print("Number of reads passing barcode alignment score filter")
+  print(table(output$barcode_score >= threshold))
+  print("Number of passed reads falling within relevant barcodes")
+  print(table(output$barcode_arrangement[output$barcode_score >= threshold] %in% relevant.barcodes))
+  boxplot(barcode_score ~ barcode_arrangement, data = output, ylim = c(0, 100),
+          xlab = "", ylab = "Barcode alignment score", outline = FALSE, las = 2)
+  abline(h = threshold, col = "red")
+  ## collect the selected reads
+  selected_reads <- output$read_id[output$barcode_score >= threshold]
+  write(selected_reads, file = file.path(directory, "selected_reads.txt"))
+  barplot(table(output$barcode_arrangement[output$barcode_score >= threshold]),
+          ylab = "Frequency passed reads",
+          ylim = c(0, 4E6), las = 2)
+  result <- output[, c("read_id", "mean_qscore_template", "run")]
+  return(result)
+}
+
+# Define data.frame that instructs which data need to be aligned to which reference
+expanded.barcodes <- unlist(mapply(function(x, y) {
+  return(rep(list(x), y))
+}, RELEVANT.BARCODES, lapply(DIRECTORIES, length), SIMPLIFY = FALSE), recursive = FALSE)
+
+## Apply QC function
+all.read.properties <- mapply(gridionQC,
+                              directory = unlist(DIRECTORIES),
+                              threshold = MIN.BARCODE.SCORE,
+                              relevant.barcodes = expanded.barcodes,
+                              all.barcodes = ALL.BARCODES,
+                              SIMPLIFY = FALSE)
+
+## Merge all qscores (output from QC function)
+all.read.properties.reduced <- Reduce(function(x, y) {rbind(x, y)}, all.read.properties)
+
+## Make a boxplot of qscores
+boxplot(mean_qscore_template ~ run, data = all.read.properties.reduced,
+        outline = FALSE, xlab = "", las = 2)
+rm(all.read.properties.reduced)
+rm(all.read.properties)
+
+```
+
+#### Process all data into count table
+
+```{r 5, echo = TRUE, include = TRUE}
+
+## Define function to get matched chains from bam file
+getMatchedChainsFromBamAllFilters <- function(merged.bam.file, alpha.levels,
+                                              beta.levels) {
+  
+  # Print current barcode
+  print(merged.bam.file)
+  
+  # Catch missing bam files
+  if (!file.exists(merged.bam.file)) {
+    return(NULL)
+  }
+  
+  # Load libraries
+  library(Rsamtools)
+  library(GenomicAlignments)
+  library(data.table)
+  
+  # Load bam file (6.637414 mins; 5.890125 mins)
+  bam <- iotools::read.delim.raw(file = pipe(paste("samtools view -@ 4 -F 256",
+                                                   merged.bam.file,
+                                                   "| cut --fields=1,2,3,5,6,10")),
+                                 header = FALSE)
+  colnames(bam) <- c("qname", "flag", "rname", "mapq","cigar", "seq")
+  # Print number of unique reads
+  print("Number of unique reads:")
+  print(length(unique(bam$qname)))
+  
+  # Select reads which are in selection
+  selection.reads <- readLines(gsub("alignments/barcode[0-9]{1,}/merged.bam", "selected_reads.txt", merged.bam.file))
+  if (!is.null(selection.reads)) {
+    bam <- bam[bam$qname %in% selection.reads, ]
+  }
+  
+  # Select reads which are smaller than 2000 bp
+  bam[, "seq.length"] <- nchar(bam$seq)
+  selection <- unique(bam$qname[bam$seq.length > 2000])
+  bam <- bam[!bam$qname %in% selection, ]
+  bam$seq <- NULL
+  
+  # Select reads with minimal alignment length
+  bam <- bam[bam$rname != "*",]
+  bam[, "alignment.length"] <- cigarOpTable(bam$cigar)[, "M"] + cigarOpTable(bam$cigar)[, "D"] -
+    cigarOpTable(bam$cigar)[, "I"]
+  bam <- bam[bam$alignment.length >= 650, ]
+  bam$cigar <- NULL
+  
+  # Convert for aggregation using data.table package
+  bam <- as.data.table(bam)
+  bam[, "isMinusStrand"] <- bamFlagAsBitMatrix(bam$flag)[, "isMinusStrand"]
+  bam[, "chain"] <- factor(ifelse(grepl("_a[0-9]{1,}$", bam$rname), "alpha", "beta"),
+                           levels = c("alpha", "beta"))
+  bam$flag <- NULL
+
+  plot(density(bam[bam$chain == "alpha"]$mapq), main = "Mapping quality")
+  lines(density(bam[bam$chain == "beta"]$mapq), col = "red")
+  legend("topleft", fill = c("black", "red"), legend = c("alpha", "beta"))
+  bam <- bam[bam$mapq >= 60,  ]
+  
+  # Aggregate data & select reads for which 1 alpha and 1 beta chain are called on the same strand
+  # Return NULL if 0 reads are filtered and paired
+  bam.aggregated <- bam[, c(list(both.chains.same.strand = length(unique(isMinusStrand)) == 1),
+                            both.chains.identified = unlist(lapply(.SD, function(x) {
+                              sum("alpha" == as.character(x)) == 1 & sum("beta" == as.character(x)) == 1
+                            }))), by = .(qname), .SDcols = "chain"]
+  print("Number of unique filtered & paired reads:")
+  print(table(bam.aggregated$both.chains.identified &
+                bam.aggregated$both.chains.same.strand, useNA = "ifany"))
+  if (length(table(bam.aggregated$both.chains.identified &
+                   bam.aggregated$both.chains.same.strand, useNA = "ifany")) == 0) {
+    return(NULL)
+  }
+  if (table(bam.aggregated$both.chains.identified &
+            bam.aggregated$both.chains.same.strand, useNA = "ifany")["TRUE"] == 0) {
+    return(NULL)
+  }
+  bam.aggregated <- bam.aggregated[bam.aggregated$both.chains.identified &
+                                     bam.aggregated$both.chains.same.strand, ]
+  bam <- bam[bam$qname %in% bam.aggregated$qname, ]
+  
+  # Reshape data
+  library(reshape2)
+  bam <- dcast(bam, qname ~ chain, value.var = "rname")
+  bam$alpha <- factor(bam$alpha, levels = alpha.levels)
+  bam$beta <- factor(bam$beta, levels = beta.levels)
+  bam <- bam[, c("alpha", "beta")]
+  
+  # Create output
+  output <- table(interaction(bam$alpha, bam$beta))
+  # Remove all variables
+  rm(list = ls()[!grepl("output", ls())])
+  gc()
+  
+  # Return
+  return(output)
+  
+}
+
+selectChainLevels <- function(reference, chain) {
+  chain.levels <- readLines(reference)
+  chain.levels <- gsub("^>", "", chain.levels[seq(1, length(chain.levels), 2)])
+  if (chain == "alpha") {
+    chain.levels <- chain.levels[grep("_a[0-9]{1,}$", chain.levels)]
+  } else if (chain == "beta") {
+    chain.levels <- chain.levels[grep("_b[0-9]{1,}$", chain.levels)]
+  } else {
+    stop("Unrecognized chain type entered")
+  }
+  return(chain.levels)
+}
+
+# Match chains using BiocParallel
+library(BiocParallel)
+bp.param <- MulticoreParam(workers = 1, tasks = nrow(expanded.alignment.design))
+all.counts <- bpmapply(getMatchedChainsFromBamAllFilters,
+                     merged.bam.file = file.path(gsub("fastq_pass", "alignments", expanded.alignment.design$path),
+                                                 "merged.bam"),
+                     alpha.levels = lapply(expanded.alignment.design$reference,
+                                           selectChainLevels, chain = "alpha"),
+                     beta.levels = lapply(expanded.alignment.design$reference,
+                                          selectChainLevels, chain = "beta"),
+                     SIMPLIFY = FALSE, BPPARAM = bp.param)
+
+# Create a data.table and add count data
+library(data.table)
+expanded.alignment.design <- as.data.table(expanded.alignment.design)
+expanded.alignment.design[, "counts"] <- all.counts
+
+# Remove entries that have no information (NULL returned from getMatchedChainsFromBamAllFilters)
+expanded.alignment.design <- expanded.alignment.design[!unlist(lapply(expanded.alignment.design$counts, is.null)), ]
+
+# Collapse count data based on combination of barcode & library
+collapsed.counts <-
+  expanded.alignment.design[, .(counts = list(Reduce(function(x, y) {
+    x + y
+  }, .SD$counts))), by = .(basename(path), library, reference), .SDcols = "counts"]
+
+# Add sample name to collapsed counts
+collapsed.counts[, "sample.name"] <- mapply(function(barcode, library, sample.names, relevant.barcodes) {
+  which.library <- relevant.barcodes[[library]]
+  which.barcode <- which(which.library == barcode)
+  return(sample.names[[library]][which.barcode])
+}, collapsed.counts$basename, collapsed.counts$library,
+   MoreArgs = list(SAMPLE.NAMES, RELEVANT.BARCODES))
+
+# Reformat into matrix
+collapsed.counts <- mapply(function(x, y) {return(y)},
+                           collapsed.counts$sample.name,
+                           collapsed.counts$counts)
+
+save(collapsed.counts, file = file.path(ANALYSIS.FOLDER, "output", "ScreenAnalysis",
+                                  "collapsed_counts.Rdata"), compress = "xz")
+
+```
+
+#### Make density plots and heatmaps
+
+```{r 6, echo = TRUE, include = TRUE}
+
+# Plot distributions of alpha, beta chains and their combination
+library(RColorBrewer)
+if (ncol(collapsed.counts) > 11) {
+  colors <- colorRampPalette(brewer.pal(11, "Spectral"))(ncol(collapsed.counts))
+} else {
+  colors <- brewer.pal(ncol(collapsed.counts), "Spectral")
+}
+plot(density(collapsed.counts[, 1], from = 1, to = 1000), log = "x",
+     xlab = "Occurence", col = colors[1], main = "",
+     ylim = c(0, max(apply(collapsed.counts, 2, function(x) {
+       max(density(x)$y)
+     }))))
+if (ncol(collapsed.counts) > 1) {
+  sink <- lapply(2:ncol(collapsed.counts), function(x) {
+    lines(density(collapsed.counts[, x], from = 1, to = 1000), col = colors[x])
+  })
+}
+legend("topleft", fill = colors, legend = colnames(collapsed.counts))
+
+# Calculate and print statistics
+output <- apply(collapsed.counts, 2, function(x) {
+  
+  dropouts <- table(factor(x == 0, levels = c(FALSE, TRUE)))["TRUE"]
+  mean.representation <- sum(x) / length(x)
+  within.median.log2.range <- table(x > median(x) / 2 & x < median(x) * 2)["TRUE"] /
+                                    sum(table(x > median(x) / 2 & x < median(x) * 2))
+  df <- data.frame(dropouts, mean.representation, within.median.log2.range)
+  return(df)
+  
+})
+output <- Reduce(function(x, y) {rbind(x, y)}, output)
+rownames(output) <- colnames(collapsed.counts)
+print(output)
+
+# Create heatmaps of correlation between samples
+collapsed.counts.cor <- cor(as.data.frame(collapsed.counts))
+library(gplots)
+heatmap.2(collapsed.counts.cor, trace = "none",
+          labRow = rownames(collapsed.counts.cor),
+          labCol = colnames(collapsed.counts.cor),
+          Colv = FALSE, Rowv = FALSE,
+          dendrogram = "none", col = colorRampPalette(c("blue", "white", "red"))(255),
+          notecol = "black", main = "Pearson")
+
+heatmap.2(collapsed.counts.cor, trace = "none",
+          labRow = rownames(collapsed.counts.cor),
+          labCol = colnames(collapsed.counts.cor),
+          Colv = FALSE, Rowv = FALSE,
+          dendrogram = "none", col = colorRampPalette(c("blue", "white", "red"))(255),
+          notecol = "black", main = "Pearson", breaks = seq(0.6, 1, length.out = 256))
+
+```
+
+#### Perform DESeq2 analysis with all samples
+
+```{r 7, echo = TRUE, include = TRUE}
+
+# Load DESeq2 library
+library(DESeq2)
+
+# Order matrix
+collapsed.counts <- collapsed.counts[, order(colnames(collapsed.counts))]
+
+# Test whether all samples have top and bottom data available
+if (!all(paste0(rep(unique(gsub("\\..*", "", colnames(collapsed.counts))), each = 2),
+       c(".bottom", ".top")) %in% colnames(collapsed.counts))) {
+  stop("Not all samples are represented by top and bottom data")
+}
+
+# Turn collapsed.counts into data.frame
+collapsed.counts.df <- lapply(seq_len(ncol(collapsed.counts)), function(x) {return(collapsed.counts[, x])})
+names(collapsed.counts.df) <- colnames(collapsed.counts)
+
+# Make all possible combinations between column and row pools & clean up df
+all.combinations <-
+  expand.grid(unique(gsub("\\..*", "", names(collapsed.counts.df)[grep("^C", names(collapsed.counts.df))])),
+              unique(gsub("\\..*", "", names(collapsed.counts.df)[grep("^R", names(collapsed.counts.df))])))
+colnames(all.combinations) <- c("pick.one", "pick.two")
+all.combinations <- data.frame(lapply(all.combinations, as.character), stringsAsFactors = FALSE)
+
+# Apply DESeq2 on the samples defined in the all.combinations df
+all.res <- apply(all.combinations, 1, function(x) {
+  pick.one <- x[names(x) == "pick.one"]
+  pick.two <- x[names(x) == "pick.two"]
+
+  ## Load DESeq2 library
+  library(DESeq2)
+  table <- data.frame(pick.one.top = collapsed.counts.df[[paste0(pick.one, ".top")]],
+                      pick.one.bottom = collapsed.counts.df[[paste0(pick.one, ".bottom")]],
+                      pick.two.top = collapsed.counts.df[[paste0(pick.two, ".top")]],
+                      pick.two.bottom = collapsed.counts.df[[paste0(pick.two, ".bottom")]],
+                      collapsed.counts.df[setdiff(names(collapsed.counts.df)[grep("\\.top$", names(collapsed.counts.df))],
+                                                   c(paste0(pick.one, ".top"), paste0(pick.two, ".top")))],
+                      collapsed.counts.df[setdiff(names(collapsed.counts.df)[grep("\\.bottom$", names(collapsed.counts.df))],
+                                                  c(paste0(pick.one, ".bottom"), paste0(pick.two, ".bottom")))],
+                      row.names = names(collapsed.counts.df[[paste0(pick.one, ".top")]]))
+  colnames(table)[1:4] <- c(paste0(pick.one, ".top"), paste0(pick.one, ".bottom"),
+                            paste0(pick.two, ".top"), paste0(pick.two, ".bottom"))
+  table <- as.matrix(table)
+  
+  ## Create metadata file
+  sample.type <- factor(c(rep(c("top", "bottom"), 2),
+                          rep(c("top", "bottom"), each = length(unique(unlist(all.combinations))) - 2)),
+                        levels = c("top", "bottom"))
+  sample.presentation <- factor(c(rep(TRUE, 4),
+                                  rep(FALSE, (length(unique(unlist(all.combinations))) - 2) * 2)),
+                                levels = c(TRUE, FALSE))
+  table.metadata <- data.frame(sample.type, sample.presentation)
+  rownames(table.metadata) <- colnames(table)
+  
+  dds <- DESeqDataSetFromMatrix(countData = table, colData = table.metadata,
+                                design = ~ sample.presentation*sample.type)
+  dds.DESeq <- DESeq(dds)
+  dds.DESeq.rlog <- rlog(dds.DESeq)
+  
+  res <- results(dds.DESeq, independentFiltering = FALSE, altHypothesis = "greater")
+  res <- as(res, "data.frame")
+  res <- res[, c("baseMean", "log2FoldChange", "pvalue", "padj")]
+  colnames(res)[2] <- "log2FC"
+  res[, "bonferroni"] <- p.adjust(res$pvalue, method = "bonferroni")
+  res[, 1:2] <- lapply(res[1:2], round, digits = 3)
+  res[, 3:5] <- lapply(res[3:5], signif, digits = 3)
+  
+  return(res)
+  
+})
+
+bonferroni.all <- mapply(function(x, y) {
+  output <- data.frame(baseMean = x$baseMean,
+                       log2FC= x$log2FC,
+                       pvalue = x$pvalue,
+                       column = rep(y["pick.one"], nrow(x)),
+                       row = rep(y["pick.two"], nrow(x)))
+  rownames(output) <- paste0(rownames(x), " ", output$column, "x", output$row)
+  return(output)
+}, all.res, as.data.frame(t(all.combinations)),
+SIMPLIFY = FALSE)
+bonferroni.all <- Reduce(function(x, y) {rbind(x, y)},
+                         bonferroni.all)
+bonferroni.all$column <- as.character(bonferroni.all$column)
+bonferroni.all$row <- as.character(bonferroni.all$row)
+bonferroni.all[, "bonferroni"] <- signif(p.adjust(bonferroni.all$pvalue, method = "bonferroni"),
+                                         digits = 3)
+bonferroni.all[, "alpha"] <- gsub("\\..*", "", rownames(bonferroni.all))
+bonferroni.all[, "beta"] <- gsub(".*\\.(.*) .*", "\\1", rownames(bonferroni.all))
+bonferroni.all[, "TMG"] <- mapply(function(r, c) {return(COMBICODING[r, c])},
+                                  bonferroni.all$row, bonferroni.all$column)
+bonferroni.all <- bonferroni.all[order(bonferroni.all$pvalue), ]
+plot(bonferroni.all$bonferroni, log = "y", pch = 16, ylab = "padj value (bonferroni)",
+     xlab = "rank", ylim = c(1e-25, 1), col = rgb(0, 0, 0, 0.1), main = "Top 10 TCR leads")
+library(RColorBrewer)
+colors <- brewer.pal(10, "Spectral")
+points(bonferroni.all$bonferroni[1:10], pch = 16, col = colors)
+legend("bottomright", legend = gsub(".*(TRA[0-9]{1,}).*(TRB.*)", "\\1.\\2",
+                                          rownames(bonferroni.all)[1:10]),
+       fill = colors)
+
+print("All hits with bonferroni < 1")
+print(bonferroni.all[which(bonferroni.all$bonferroni < 1), ], row.names = FALSE)
+write.table(bonferroni.all, file = file.path(ANALYSIS.FOLDER, "output",
+                                             "ScreenAnalysis", "results.tsv"),
+            quote = FALSE, row.names = FALSE, sep = "\t")
+
+```
+
+#### sessionInfo
+
+```{r sessionInfo, echo = TRUE}
+
+cat(system("guppy_basecaller --version", intern = TRUE))
+sessionInfo()
+
+```
+
